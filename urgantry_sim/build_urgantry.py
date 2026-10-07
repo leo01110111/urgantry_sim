@@ -397,7 +397,7 @@ def build_model(spawn_props: bool = False) -> mujoco.MjModel:
 INITIAL_VIEW = {
     "azimuth": 90.0,
     "elevation": -12.0,
-    "distance": 2.6 + EXPOSED_DEPTH,
+    "distance": 2.4,
     "lookat": [0.0, Y0 + 0.3 * EXPOSED_DEPTH, BOARD_TOP + 0.30],
 }
 

@@ -1,0 +1,209 @@
+# urgantry_sim
+
+MuJoCo sim of the gantry-mounted bimanual setup: two UR7e arms hang upside down
+off a central column over a 112 x 58.5 cm tabletop, each with a 5-finger Wuji
+hand. It can be used two ways:
+
+1. **As a Gymnasium env** (`SimGantryUR7e-v0`) to run or evaluate a policy.
+2. **As a raw MuJoCo model** (`build_urgantry.build_scene`) for scripting, IK,
+   data generation, or anything that needs direct `MjModel` / `MjData` access.
+
+The arm MJCF lives at `universal_robots_ur5e/ur5e.xml` for historical reasons;
+the robot is a UR7e.
+
+## Install
+
+```bash
+git clone https://github.com/leo01110111/urgantry_sim.git
+cd urgantry_sim
+uv sync --extra viz          # or: pip install -e ".[viz]"
+```
+
+The `viz` extra (OpenCV) is only needed for `test_viz.py`.
+
+Headless machines need an offscreen GL backend for camera rendering:
+
+```bash
+export MUJOCO_GL=egl         # or osmesa
+```
+
+Quick checks:
+
+```bash
+cd urgantry_sim
+uv run python build_urgantry.py               # interactive viewer, no stepping logic
+uv run python test_env.py --no-view           # random actions through the gym env
+uv run python test_viz.py                     # viewer + top1 camera window
+```
+
+Developed against MuJoCo 3.9. Newer versions print "Attach conflict" warnings
+while building the model; they are harmless (the root model's solver options win).
+
+## Scene
+
+- World frame: origin on the floor at the center of the exposed table; +x right
+  along the mount edge, +y away from the mount, +z up. Meters.
+- Table board top: z = 0.775 (`BOARD_TOP`). Exposed area: x in [-0.56, 0.56],
+  y in [-0.2925, 0.2925].
+- Physics timestep: 2 ms. Every actuator is a position servo (ctrl = joint
+  target in radians).
+- One camera, `top1`: wide-angle (80 deg fovy) on the front of the gantry head,
+  looking down the workspace past the arms.
+- Optional props (`spawn_props=True`): a 5 cm green cube (`block`) at about
+  (0.32, -0.07) and an open cardboard tray (`cardboard_box`) mirrored at x = -0.32.
+  **The default is the bare scene without them.**
+
+### Actuators (52)
+
+| index | names | ctrlrange (rad) |
+|---|---|---|
+| 0-5 | `left_shoulder_pan`, `left_shoulder_lift`, `left_elbow`, `left_wrist_1`, `left_wrist_2`, `left_wrist_3` | +-2pi (elbow +-2.79) |
+| 6-25 | `left_hand_finger{1..5}_joint{1..4}`, finger-major | +-1.57 |
+| 26-31 | `right_*` arm, same order | same |
+| 32-51 | `right_hand_finger{1..5}_joint{1..4}` | same |
+
+Per finger, `joint1` is spread (thumb: rotation) and `joint2..4` curl. All-zero
+hand ctrl is a flat open hand; ~1.2 on every joint is a fist.
+
+---
+
+## Use case 1: the Gymnasium env
+
+```python
+import gymnasium as gym
+import urgantry_sim  # registers SimGantryUR7e-v0
+
+env = gym.make("SimGantryUR7e-v0")                     # bare scene
+env = gym.make("SimGantryUR7e-v0", spawn_props=True)   # block-lift task
+
+obs, info = env.reset()
+for _ in range(400):
+    action = env.action_space.sample()
+    obs, reward, terminated, truncated, info = env.step(action)
+    if terminated or truncated:
+        break
+env.close()
+```
+
+### Constructor kwargs
+
+| kwarg | default | meaning |
+|---|---|---|
+| `spawn_props` | `False` | add the block and tray (enables the pick task) |
+| `normalized_actions` | `False` | `True`: actions in [-1, 1] mapped onto each ctrlrange |
+| `control_hz` | `20.0` | policy rate; each `step()` runs `round(1 / (control_hz * 0.002))` physics steps |
+| `max_episode_steps` | `400` | env truncates itself; no gym `TimeLimit` wrapper is added |
+| `image_size` | `224` | square size of the `top1` render |
+| `prompt` | `""` | instruction string returned by `get_openpi_observation()` |
+| `show_viewer` | `False` | open a live MuJoCo viewer window alongside |
+
+### Spaces
+
+- **Action** `Box((52,), float32)`: actuator targets in the table order above.
+  Raw radians clipped to ctrlrange, or [-1, 1] with `normalized_actions=True`.
+- **Observation** `Dict`:
+  - `state`: `(52,)` float32 joint positions, same order as the action.
+  - `image`: `(image_size, image_size, 3)` uint8 RGB from `top1`.
+
+### Reward and termination
+
+- With `spawn_props=True`: `reward = 1.0` once the block center is 5 cm above its
+  rest height (also sets `terminated=True`), otherwise `max(0, block lift in m)`.
+  `info = {"success": 0|1, "block_height": z}`.
+- With the bare scene: reward is always 0, `info = {"success": 0}`, and episodes
+  only end by truncation.
+
+### Reset
+
+Deterministic: both arms go to the home pose (hands open, palms down over the
+table, fingers pointing +y) with actuators commanded to hold it; props go back to
+fixed rest poses. No randomization.
+
+### Remote policies (OpenPi)
+
+`env.unwrapped.get_openpi_observation(prompt=None)` returns
+`{"observation/image", "observation/state", "prompt"}` for sending to an OpenPi
+websocket server; feed the returned action chunk back through `env.step()`.
+
+---
+
+## Use case 2: the sim directly
+
+`build_urgantry` exposes the model builder and helpers without any gym wrapper.
+
+```python
+import mujoco
+import numpy as np
+from urgantry_sim.build_urgantry import build_scene, set_hand, HAND_CURL_CLOSED
+
+model, data = build_scene()                   # or build_scene(spawn_props=True)
+# data is at the home pose, ctrl holds it, mj_forward has been run.
+
+# Command joints by actuator name (position targets, radians).
+data.ctrl[model.actuator("right_elbow").id] -= 0.2
+set_hand(model, data, "left", HAND_CURL_CLOSED)  # every left-hand joint to a fist
+
+for _ in range(500):                          # 1 s at the 2 ms timestep
+    mujoco.mj_step(model, data)
+
+# Read state.
+q = data.qpos[model.joint("right_elbow_joint").qposadr[0]]
+palm = data.body("right_hand_palm_link").xpos
+
+# Render the top camera.
+renderer = mujoco.Renderer(model, height=480, width=640)
+renderer.update_scene(data, camera="top1")
+rgb = renderer.render()                       # (480, 640, 3) uint8
+```
+
+### Builders
+
+| function | returns |
+|---|---|
+| `build_spec(spawn_props=False)` | editable `mujoco.MjSpec`; add bodies, cameras, sensors before compiling |
+| `build_model(spawn_props=False)` | compiled `MjModel` |
+| `build_scene(spawn_props=False)` | `(model, data)` at the home pose, ready to step |
+| `set_initial_pose(model, data)` | resets arms and hands to home and props to rest (call `mj_forward` after) |
+
+### Helpers and constants
+
+- `set_hand(model, data, side, curl)`: set all 20 joints of one hand to `curl`
+  radians. `hand_actuators(side)` lists those actuator names in order.
+- `LEFT_HOME_POSE`, `RIGHT_HOME_POSE`: home joint angles, in `ARM_JOINTS` order.
+- `block_height(model, data)`, `pick_success(model, data)`, `has_props(model)`.
+- Geometry: `BOARD_TOP`, `HALF_LEN`, `Y0`, `Y1`, `BLOCK_INIT_POS`, `BOX_INIT_POS`.
+
+### Names worth knowing
+
+- Joints: `{left,right}_{shoulder_pan,shoulder_lift,elbow,wrist_1,wrist_2,wrist_3}_joint`,
+  `{left,right}_hand_finger{1..5}_joint{1..4}`; with props also the free joints
+  `block_joint` and `cardboard_box_joint` (qpos `[x, y, z, qw, qx, qy, qz]`).
+- Bodies: `{side}_flange_adapter`, `{side}_hand_palm_link`, `block`, `cardboard_box`.
+- Sites: `{side}_attachment_site` (UR tool flange), `{side}_ft_site`.
+- Sensors: `{side}_ft_force`, `{side}_ft_torque`. These read the wrench between
+  the hand and wrist_3 in the flange frame, like a UR wrist F/T sensor. They are
+  nonzero at rest (tool weight), so tare against a no-contact reading.
+  Access with `data.sensor("right_ft_force").data`.
+
+### Viewer
+
+```python
+import mujoco.viewer
+from urgantry_sim.build_urgantry import apply_initial_view
+
+with mujoco.viewer.launch_passive(model, data) as viewer:
+    apply_initial_view(viewer)
+    while viewer.is_running():
+        mujoco.mj_step(model, data)
+        viewer.sync()
+```
+
+---
+
+## Third-party assets
+
+- `urgantry_sim/universal_robots_ur5e/`: derived from the MuJoCo Menagerie UR5e
+  model (BSD-3-Clause, see its `LICENSE`), re-tuned toward UR7e specs.
+- `urgantry_sim/wuji_hand/`: MJCF and meshes from
+  [wuji-technology/wuji-hand-description](https://github.com/wuji-technology/wuji-hand-description)
+  (MIT, see its `LICENSE`).

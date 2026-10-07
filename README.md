@@ -218,7 +218,10 @@ rgb = renderer.render()                       # (480, 640, 3) uint8
 ### Exporting one MJCF file
 
 The scene is assembled in Python (the arm and hand MJCFs are attached with the
-`mjSpec` API), so there is no checked-in scene XML. To get one:
+`mjSpec` API). Pre-exported copies of the default (bare, no props) scene live at
+the repo root: `scene_wuji.xml` and `scene_sharpa.xml`
+(`python -m mujoco.viewer --mjcf=scene_sharpa.xml`). They are snapshots: re-export
+after changing `build_urgantry.py`. To export another variant:
 
 ```bash
 uv run python urgantry_sim/build_urgantry.py --hand sharpa --props --export scene.xml

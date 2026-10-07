@@ -4,13 +4,14 @@ import cv2
 import mujoco
 import mujoco.viewer
 import numpy as np
-from build_urgantry import apply_initial_view, build_scene, capture_state
+from build_urgantry import apply_initial_view, build_scene, capture_state, parse_scene_args
 
 CAMERAS = ["top1"]
 
 
 def main():
-    model, data = build_scene()
+    args = parse_scene_args()
+    model, data = build_scene(spawn_props=args.props, hand=args.hand)
     renderer = mujoco.Renderer(model, height=300, width=450)
 
     # A camera's user[0] is its target capture fps; cameras without one update

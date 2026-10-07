@@ -33,7 +33,7 @@ try:
     # `urgantry_sim.env`, which has a parent package, so the relative import resolves.
     from .build_urgantry import (
         build_model, set_initial_pose, block_height, pick_success, BLOCK_REST_Z,
-        apply_initial_view,
+        apply_initial_view, DEFAULT_HAND,
     )
 except ImportError:
     # Dev/script form: run directly from inside urgantry_sim/ (e.g. `python
@@ -41,23 +41,25 @@ except ImportError:
     # on sys.path instead.
     from build_urgantry import (
         build_model, set_initial_pose, block_height, pick_success, BLOCK_REST_Z,
-        apply_initial_view,
+        apply_initial_view, DEFAULT_HAND,
     )
 
 
 class SimGantryUR7eEnv(gym.Env):
-    """Two 6-DOF UR7e arms hanging off a gantry column, each with a 5-finger Wuji
-    hand (52 actuators: 12 arm joints + 2 x 20 hand joints), position-controlled.
+    """Two 6-DOF UR7e arms hanging off a gantry column, each with a 5-finger
+    hand, position-controlled. hand='wuji' (default): 52 actuators, 12 arm joints
+    + 2 x 20 hand joints. hand='sharpa': 56 actuators, 12 arm + 2 x 22 hand.
 
     Task: lift the block off the table (see build_urgantry.pick_success).
     spawn_props=False (default) builds the bare scene (no block, no cardboard tray); reward
     is then always 0 and the episode only ends by truncation.
 
-    Action: 52 actuator targets. With normalized_actions=True the action space is
-    Box(-1, 1) (OGPO style) mapped onto each actuator's ctrlrange; otherwise raw
-    ctrlrange (all joints in radians; hand joints are 0 flat-open, ~1.2 curled).
+    Action: nu actuator targets (left arm, left hand, right arm, right hand).
+    With normalized_actions=True the action space is Box(-1, 1) (OGPO style)
+    mapped onto each actuator's ctrlrange; otherwise raw ctrlrange (all joints in
+    radians; all-zero hand ctrl is the flat open hand).
 
-    Observation: {'state': (52,) actuator joint positions,
+    Observation: {'state': (nu,) actuator joint positions,
                   'image': (H, W, 3) uint8 — the top1 camera}.
     """
 
@@ -72,10 +74,12 @@ class SimGantryUR7eEnv(gym.Env):
         prompt: str = "",
         show_viewer: bool = False,
         spawn_props: bool = False,
+        hand: str = DEFAULT_HAND,
     ):
         super().__init__()
         self.spawn_props = spawn_props
-        self.model = build_model(spawn_props)
+        self.hand = hand
+        self.model = build_model(spawn_props, hand)
         self.data = mujoco.MjData(self.model)
         self.image_size = image_size
         self.normalized_actions = normalized_actions
@@ -143,7 +147,7 @@ class SimGantryUR7eEnv(gym.Env):
         return frames
 
     def _proprio(self) -> np.ndarray:
-        """Per-actuator joint position (nu,): 12 arm joints + 40 hand joints.
+        """Per-actuator joint position (nu,): 12 arm joints + both hands' joints.
         Read via each actuator's driven joint so it's robust to qpos layout."""
         m, d = self.model, self.data
         out = np.empty(m.nu, dtype=np.float32)

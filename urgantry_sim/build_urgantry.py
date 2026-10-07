@@ -2,7 +2,8 @@
 
 One Vention column stands at the middle of the near edge of the table; two UR7e
 arms hang upside down off its head, splayed 45 deg outward, each with a 5-finger
-Wuji hand (20 position-controlled joints). The exposed tabletop in front of the
+hand: Wuji (20 position-controlled joints) or Sharpa Wave (22), chosen with the
+`hand` argument. The exposed tabletop in front of the
 mount is the
 "half" rectangle benchmarked in tabletop_tests/build_tabletop_half.py:
 112 cm along the mount edge x 58.5 cm deep. Defines the reward functions used
@@ -24,7 +25,8 @@ Coordinate frame: origin on the floor at the center of the exposed tabletop.
   The column stands on its own strip of table behind Y0, so it never eats into
   the exposed rectangle.
 
-Run directly to open the interactive viewer:  uv run python build_urgantry.py
+Run directly to open the interactive viewer:
+  uv run python build_urgantry.py [--hand wuji|sharpa] [--props]
 """
 
 from pathlib import Path
@@ -41,12 +43,21 @@ ASSET_DIR = Path(__file__).resolve().parent
 # physics in that file is being changed to a UR7e.
 UR7E_PATH = str(ASSET_DIR / "universal_robots_ur5e" / "ur5e.xml")
 
-# The hand MJCF + meshes under `wuji_hand/` are a verbatim copy of
-# wuji-technology/wuji_hand_description; left.xml / right.xml are mirrored models
-# sharing one palm frame convention: fingers grow along palm +z, the grasping side
-# faces palm +x (measured: curling moves the fingertips toward +x).
-HAND_PATHS = {side: str(ASSET_DIR / "wuji_hand" / "mjcf" / f"{side}.xml")
-              for side in ("left", "right")}
+# Hand MJCF + meshes are verbatim copies: `wuji_hand/` from
+# wuji-technology/wuji_hand_description, `sharpa_wave/` from mujoco_menagerie.
+# Both share one palm frame convention, so they mount with the same HAND_ROLL:
+# fingers grow along palm +z, the grasping side faces palm +x (measured: curling
+# moves the fingertips toward +x), thumb on palm -y for the left hand, +y right.
+HANDS = ("wuji", "sharpa")
+DEFAULT_HAND = "wuji"
+HAND_PATHS = {
+    "wuji": {side: str(ASSET_DIR / "wuji_hand" / "mjcf" / f"{side}.xml")
+             for side in ("left", "right")},
+    "sharpa": {side: str(ASSET_DIR / "sharpa_wave" / f"{side}_hand.xml")
+               for side in ("left", "right")},
+}
+# Palm body name after the Sharpa side prefix is stripped (see _strip_side_prefix).
+HAND_PALM = {"wuji": "palm_link", "sharpa": "hand_C_MC"}
 
 # ---------------------------------------------------------------- measurements
 TABLE_H = 0.76          # aluminum frame top height
@@ -94,27 +105,33 @@ ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "w
 LEFT_HOME_POSE = [ 1.7002, -1.5626,  1.6061, -0.0435,  1.7002,  0.7908]
 RIGHT_HOME_POSE = [-1.7002, -1.5789, -1.6061, -3.0981, -1.7002, -0.7908]
 
-# Wuji hand: 5 fingers x 4 position-controlled joints per hand, ctrl in radians.
-# joint1 = spread/abduction (thumb: rotation), joint2..4 = curl. All-zero ctrl is
-# the flat open hand; HAND_CURL_CLOSED curls every finger into a fist.
-HAND_FINGERS = (1, 2, 3, 4, 5)
-HAND_FINGER_JOINTS = (1, 2, 3, 4)
+# Hand closure for set_hand: 0 = open, 1 = fist. All-zero ctrl is the flat open
+# hand for both models.
+# Wuji: 5 fingers x 4 joints, ctrl in radians. On fingers 2-5 joint1 flexes at
+# the knuckle and joint2 spreads (measured); joint3..4 curl. A fist puts
+# WUJI_CURL_CLOSED on every joint.
+# Sharpa: 22 joints named by anatomy (thumb CMC/MCP/IP, finger MCP_FE/MCP_AA/
+# PIP/DIP, pinky CMC). Flexion is negative on the right hand and positive on the
+# left, so a fist drives each flexion joint SHARPA_CLOSED_FRAC of the way to its
+# flexion limit and leaves abduction (AA) and pinky CMC at zero.
 HAND_OPEN = 0.0
-HAND_CURL_CLOSED = 1.2
+HAND_CLOSED = 1.0
+WUJI_CURL_CLOSED = 1.2
+SHARPA_CLOSED_FRAC = 0.8
 
 # A cylindrical adapter sits on the tool flange and the palm sits on the adapter,
 # rolled about the flange axis by HAND_ROLL. The right hand is rolled 180 deg,
 # putting its grasping side (palm +x) on the opposite side from the left's.
-# The palm mesh's two-hole wrist lip reaches 9.1 mm below the palm origin (palm
-# -z), so the palm origin sits that far past the adapter's top face. The UR mesh's
+# Each palm mesh reaches below its origin (palm -z): Wuji's two-hole wrist lip by
+# 9.1 mm, Sharpa's wrist base by 4.9 mm (measured from the palm mesh vertices), so
+# the palm origin sits that far past the adapter's top face. The UR mesh's
 # flange face is 1.06 mm short of attachment_site (measured from wrist_3 mesh
 # vertices), so the adapter starts at the mesh face, not at the site.
 FLANGE_FACE_Z = -0.00106
 ADAPTER_T = 0.0217
 ADAPTER_R = 0.0315                     # ISO 9409-1-50 flange, 63 mm
 ADAPTER_MASS = 0.09
-PALM_LIP_DEPTH = 0.0091
-HAND_MOUNT_Z = FLANGE_FACE_Z + ADAPTER_T + PALM_LIP_DEPTH
+PALM_LIP_DEPTH = {"wuji": 0.0091, "sharpa": 0.0049}
 ADAPTER_RGBA = [0.75, 0.76, 0.78, 1]
 HAND_ROLL = {
     "left": [1.0, 0.0, 0.0, 0.0],
@@ -187,12 +204,28 @@ def _lookat_quat(cam_pos, target):
     return quat
 
 
-def _arm_with_hand(side: str) -> mujoco.MjSpec:
+def _strip_side_prefix(spec: mujoco.MjSpec, side: str) -> None:
+    """Drop the Sharpa MJCF's own 'left_'/'right_' name prefix (and the
+    references to those names), so the attach prefixes give
+    'left_hand_index_MCP_FE' rather than 'left_hand_left_index_MCP_FE'."""
+    prefix = f"{side}_"
+    strip = lambda name: name[len(prefix):] if name.startswith(prefix) else name
+    for elements in (spec.bodies, spec.joints, spec.geoms, spec.sites, spec.actuators):
+        for el in elements:
+            el.name = strip(el.name)
+    for act in spec.actuators:
+        act.target = strip(act.target)
+    for ex in spec.excludes:
+        ex.bodyname1 = strip(ex.bodyname1)
+        ex.bodyname2 = strip(ex.bodyname2)
+
+
+def _arm_with_hand(side: str, hand: str) -> mujoco.MjSpec:
     """Load a UR7e, add the flange adapter body (frame = flange frame, i.e. the
-    attachment site), and bolt the matching (left/right) Wuji hand onto the
-    adapter. The hand's 20 position actuators and its contact exclusions come
-    along with the attach, prefixed 'hand_' (final actuator names e.g.
-    'left_hand_finger1_joint1')."""
+    attachment site), and bolt the matching (left/right) hand onto the adapter.
+    The hand's position actuators and its contact exclusions come along with the
+    attach, prefixed 'hand_' (final actuator names e.g. 'left_hand_finger1_joint1'
+    for Wuji, 'left_hand_index_MCP_FE' for Sharpa)."""
     arm = mujoco.MjSpec.from_file(UR7E_PATH)
     flange = arm.site("attachment_site")
     adapter = arm.body("wrist_3_link").add_body(name="flange_adapter",
@@ -201,10 +234,13 @@ def _arm_with_hand(side: str) -> mujoco.MjSpec:
                      size=[ADAPTER_R, ADAPTER_T / 2, 0],
                      pos=[0, 0, FLANGE_FACE_Z + ADAPTER_T / 2],
                      mass=ADAPTER_MASS, rgba=ADAPTER_RGBA)
-    hand = mujoco.MjSpec.from_file(HAND_PATHS[side])
-    palm = hand.body("palm_link")
+    hand_spec = mujoco.MjSpec.from_file(HAND_PATHS[hand][side])
+    if hand == "sharpa":
+        _strip_side_prefix(hand_spec, side)
+    palm = hand_spec.body(HAND_PALM[hand])
     palm.quat = HAND_ROLL[side]
-    adapter.add_site(name="hand_mount", pos=[0, 0, HAND_MOUNT_Z]).attach_body(palm, "hand_", "")
+    mount_z = FLANGE_FACE_Z + ADAPTER_T + PALM_LIP_DEPTH[hand]
+    adapter.add_site(name="hand_mount", pos=[0, 0, mount_z]).attach_body(palm, "hand_", "")
     return arm
 
 
@@ -265,9 +301,12 @@ def _add_props(wb: mujoco.MjsBody) -> None:
 
 
 
-def build_spec(spawn_props: bool = False) -> mujoco.MjSpec:
-    """Floor, room, table, gantry column, two hanging UR7e arms, the overhead
-    camera, and (when spawn_props) the graspable block and cardboard tray."""
+def build_spec(spawn_props: bool = False, hand: str = DEFAULT_HAND) -> mujoco.MjSpec:
+    """Floor, room, table, gantry column, two hanging UR7e arms with `hand`
+    ('wuji' or 'sharpa') hands, the overhead camera, and (when spawn_props) the
+    graspable block and cardboard tray."""
+    if hand not in HANDS:
+        raise ValueError(f"hand must be one of {HANDS}, got {hand!r}")
     spec = mujoco.MjSpec()
     spec.compiler.autolimits = True
     # Offscreen buffer sized for the OV9782 wrist cameras (1280x800); covers the
@@ -350,7 +389,7 @@ def build_spec(spawn_props: bool = False) -> mujoco.MjSpec:
         mount.add_geom(name=f"plate_{side}", type=mujoco.mjtGeom.mjGEOM_BOX,
                        size=[0.075, 0.075, PLATE_T / 2], pos=[0, 0, -PLATE_T / 2],
                        rgba=COL_PLATE, contype=0, conaffinity=0)
-        mount.add_frame().attach_body(_arm_with_hand(side).body("base"), f"{side}_", "")
+        mount.add_frame().attach_body(_arm_with_hand(side, hand).body("base"), f"{side}_", "")
 
     # Wrist F/T: force+torque sensors at each flange (attachment_site) report the wrench
     # transmitted between the adapter+hand subtree and wrist_3, in the flange
@@ -379,8 +418,8 @@ def build_spec(spawn_props: bool = False) -> mujoco.MjSpec:
     return spec
 
 
-def build_model(spawn_props: bool = False) -> mujoco.MjModel:
-    return build_spec(spawn_props).compile()
+def build_model(spawn_props: bool = False, hand: str = DEFAULT_HAND) -> mujoco.MjModel:
+    return build_spec(spawn_props, hand).compile()
 
 
 # ======================================================================== #
@@ -419,19 +458,41 @@ def set_initial_pose(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             data.qpos[adr:adr + 7] = [*pos, 1, 0, 0, 0]
 
 
-def hand_actuators(side: str) -> list[str]:
-    """Names of one hand's 20 position actuators, finger-major then joint order."""
-    return [f"{side}_hand_finger{f}_joint{j}"
-            for f in HAND_FINGERS for j in HAND_FINGER_JOINTS]
+def hand_type(model: mujoco.MjModel) -> str:
+    """'wuji' or 'sharpa', read off the compiled model's actuator names."""
+    wuji = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "left_hand_finger1_joint1")
+    return "wuji" if wuji >= 0 else "sharpa"
 
 
-def set_hand(model: mujoco.MjModel, data: mujoco.MjData, side: str, curl: float) -> None:
-    """Command one hand's joints: `curl` radians on every joint (HAND_OPEN flat,
-    HAND_CURL_CLOSED a fist), clipped to each actuator's ctrlrange."""
-    for name in hand_actuators(side):
-        act = model.actuator(name)
-        lo, hi = act.ctrlrange
-        data.ctrl[act.id] = float(np.clip(curl, lo, hi))
+def hand_actuators(model: mujoco.MjModel, side: str) -> list[str]:
+    """Names of one hand's position actuators (20 Wuji, 22 Sharpa), in actuator
+    order."""
+    names = [model.actuator(i).name for i in range(model.nu)]
+    return [n for n in names if n.startswith(f"{side}_hand_")]
+
+
+def hand_pose(model: mujoco.MjModel, side: str, closure: float) -> np.ndarray:
+    """Ctrl targets for one hand, in hand_actuators order: closure 0 (HAND_OPEN)
+    is the flat open hand, 1 (HAND_CLOSED) a fist. Clipped to each ctrlrange."""
+    kind = hand_type(model)
+    out = []
+    for name in hand_actuators(model, side):
+        lo, hi = model.actuator(name).ctrlrange
+        if kind == "wuji":
+            target = closure * WUJI_CURL_CLOSED
+        elif name.endswith(("_AA", "pinky_CMC")):
+            target = 0.0
+        else:
+            flex_limit = lo if side == "right" else hi
+            target = closure * SHARPA_CLOSED_FRAC * flex_limit
+        out.append(float(np.clip(target, lo, hi)))
+    return np.array(out)
+
+
+def set_hand(model: mujoco.MjModel, data: mujoco.MjData, side: str, closure: float) -> None:
+    """Command one hand to hand_pose(closure): 0 open, 1 fist."""
+    ids = [model.actuator(n).id for n in hand_actuators(model, side)]
+    data.ctrl[ids] = hand_pose(model, side, closure)
 
 
 def has_props(model: mujoco.MjModel) -> bool:
@@ -474,21 +535,31 @@ def capture_state(data: mujoco.MjData, viewer) -> None:
           [round(float(data.qpos[i]), 4) for i in range(6)], "\n")
 
 
-def build_scene(spawn_props: bool = False) -> tuple[mujoco.MjModel, mujoco.MjData]:
+def build_scene(spawn_props: bool = False,
+                hand: str = DEFAULT_HAND) -> tuple[mujoco.MjModel, mujoco.MjData]:
     """Build the scene and return model + data initialized to the home pose, with
     the position actuators commanded to hold it and forward kinematics evaluated."""
-    model = build_model(spawn_props)
+    model = build_model(spawn_props, hand)
     data = mujoco.MjData(model)
     set_initial_pose(model, data)
     mujoco.mj_forward(model, data)
     return model, data
 
 
+def parse_scene_args(argv=None):
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--hand", choices=HANDS, default=DEFAULT_HAND)
+    p.add_argument("--props", action="store_true", help="spawn the block and tray")
+    return p.parse_args(argv)
+
+
 def main() -> None:
     import time
     import mujoco.viewer
 
-    model, data = build_scene()
+    args = parse_scene_args()
+    model, data = build_scene(spawn_props=args.props, hand=args.hand)
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         apply_initial_view(viewer)

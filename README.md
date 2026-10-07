@@ -1,8 +1,9 @@
 # urgantry_sim
 
 MuJoCo sim of the gantry-mounted bimanual setup: two UR7e arms hang upside down
-off a central column over a 112 x 58.5 cm tabletop, each with a 5-finger Wuji
-hand. It can be used two ways:
+off a central column over a 112 x 58.5 cm tabletop, each with a 5-finger hand:
+**Wuji** (default) or **Sharpa Wave**, switchable with one setting. It can be used
+two ways:
 
 1. **As a Gymnasium env** (`SimGantryUR7e-v0`) to run or evaluate a policy.
 2. **As a raw MuJoCo model** (`build_urgantry.build_scene`) for scripting, IK,
@@ -36,6 +37,9 @@ uv run python test_env.py --no-view           # random actions through the gym e
 uv run python test_viz.py                     # viewer + top1 camera window
 ```
 
+All three take `--hand wuji|sharpa`; `build_urgantry.py` and `test_viz.py` also
+take `--props` to spawn the block and tray.
+
 Developed against MuJoCo 3.9. Newer versions print "Attach conflict" warnings
 while building the model; they are harmless (the root model's solver options win).
 
@@ -53,17 +57,35 @@ while building the model; they are harmless (the root model's solver options win
   (0.32, -0.07) and an open cardboard tray (`cardboard_box`) mirrored at x = -0.32.
   **The default is the bare scene without them.**
 
-### Actuators (52)
+### Hands
 
-| index | names | ctrlrange (rad) |
+`hand="wuji"` (default) or `hand="sharpa"` on the gym env and on every builder.
+Both bolt onto the same 63 mm flange adapter cylinder with the same orientation:
+palms toward the table at home, fingers along +y, thumbs on the inner side.
+
+| | Wuji | Sharpa Wave |
 |---|---|---|
-| 0-5 | `left_shoulder_pan`, `left_shoulder_lift`, `left_elbow`, `left_wrist_1`, `left_wrist_2`, `left_wrist_3` | +-2pi (elbow +-2.79) |
-| 6-25 | `left_hand_finger{1..5}_joint{1..4}`, finger-major | +-1.57 |
-| 26-31 | `right_*` arm, same order | same |
-| 32-51 | `right_hand_finger{1..5}_joint{1..4}` | same |
+| joints per hand | 20 | 22 |
+| total actuators (`nu`) | 52 | 56 |
+| actuator names | `{side}_hand_finger{1..5}_joint{1..4}` | `{side}_hand_{thumb,index,middle,ring,pinky}_{...}` |
+| palm body | `{side}_hand_palm_link` | `{side}_hand_hand_C_MC` |
 
-Per finger, `joint1` is spread (thumb: rotation) and `joint2..4` curl. All-zero
-hand ctrl is a flat open hand; ~1.2 on every joint is a fist.
+### Actuators
+
+Order: left arm (6), left hand (H), right arm (6), right hand (H), with H = 20
+(Wuji) or 22 (Sharpa).
+
+| block | names | ctrlrange (rad) |
+|---|---|---|
+| left arm | `left_shoulder_pan`, `left_shoulder_lift`, `left_elbow`, `left_wrist_1`, `left_wrist_2`, `left_wrist_3` | +-2pi (elbow +-2.79) |
+| left hand, Wuji | `left_hand_finger{1..5}_joint{1..4}`, finger-major | +-1.57 |
+| left hand, Sharpa | `left_hand_thumb_{CMC_FE, CMC_AA, MCP_FE, MCP_AA, IP}`, `left_hand_{index,middle,ring}_{MCP_FE, MCP_AA, PIP, DIP}`, `left_hand_pinky_{CMC, MCP_FE, MCP_AA, PIP, DIP}` | per joint, the joint's range |
+| right arm / hand | same with `right_` | same |
+
+All-zero hand ctrl is the flat open hand for both. Wuji: on fingers 2-5 `joint1`
+flexes at the knuckle, `joint2` spreads, `joint3..4` curl. Sharpa: `_FE` / `PIP` /
+`DIP` / `IP` flex (negative on the right hand, positive on the left), `_AA`
+spreads. Use `set_hand` (below) for an open/fist command that works for both.
 
 ---
 
@@ -75,6 +97,7 @@ import urgantry_sim  # registers SimGantryUR7e-v0
 
 env = gym.make("SimGantryUR7e-v0")                     # bare scene
 env = gym.make("SimGantryUR7e-v0", spawn_props=True)   # block-lift task
+env = gym.make("SimGantryUR7e-v0", hand="sharpa")      # Sharpa Wave hands
 
 obs, info = env.reset()
 for _ in range(400):
@@ -89,6 +112,7 @@ env.close()
 
 | kwarg | default | meaning |
 |---|---|---|
+| `hand` | `"wuji"` | `"wuji"` or `"sharpa"` |
 | `spawn_props` | `False` | add the block and tray (enables the pick task) |
 | `normalized_actions` | `False` | `True`: actions in [-1, 1] mapped onto each ctrlrange |
 | `control_hz` | `20.0` | policy rate; each `step()` runs `round(1 / (control_hz * 0.002))` physics steps |
@@ -99,10 +123,11 @@ env.close()
 
 ### Spaces
 
-- **Action** `Box((52,), float32)`: actuator targets in the table order above.
+- **Action** `Box((nu,), float32)`, nu = 52 (Wuji) or 56 (Sharpa): actuator
+  targets in the order above.
   Raw radians clipped to ctrlrange, or [-1, 1] with `normalized_actions=True`.
 - **Observation** `Dict`:
-  - `state`: `(52,)` float32 joint positions, same order as the action.
+  - `state`: `(nu,)` float32 joint positions, same order as the action.
   - `image`: `(image_size, image_size, 3)` uint8 RGB from `top1`.
 
 ### Reward and termination
@@ -134,21 +159,21 @@ websocket server; feed the returned action chunk back through `env.step()`.
 ```python
 import mujoco
 import numpy as np
-from urgantry_sim.build_urgantry import build_scene, set_hand, HAND_CURL_CLOSED
+from urgantry_sim.build_urgantry import build_scene, set_hand, HAND_CLOSED
 
-model, data = build_scene()                   # or build_scene(spawn_props=True)
+model, data = build_scene()                   # or build_scene(spawn_props=True, hand="sharpa")
 # data is at the home pose, ctrl holds it, mj_forward has been run.
 
 # Command joints by actuator name (position targets, radians).
 data.ctrl[model.actuator("right_elbow").id] -= 0.2
-set_hand(model, data, "left", HAND_CURL_CLOSED)  # every left-hand joint to a fist
+set_hand(model, data, "left", HAND_CLOSED)    # left hand to a fist, either hand model
 
 for _ in range(500):                          # 1 s at the 2 ms timestep
     mujoco.mj_step(model, data)
 
 # Read state.
 q = data.qpos[model.joint("right_elbow_joint").qposadr[0]]
-palm = data.body("right_hand_palm_link").xpos
+palm = data.body("right_flange_adapter").xpos
 
 # Render the top camera.
 renderer = mujoco.Renderer(model, height=480, width=640)
@@ -160,15 +185,19 @@ rgb = renderer.render()                       # (480, 640, 3) uint8
 
 | function | returns |
 |---|---|
-| `build_spec(spawn_props=False)` | editable `mujoco.MjSpec`; add bodies, cameras, sensors before compiling |
-| `build_model(spawn_props=False)` | compiled `MjModel` |
-| `build_scene(spawn_props=False)` | `(model, data)` at the home pose, ready to step |
+| `build_spec(spawn_props=False, hand="wuji")` | editable `mujoco.MjSpec`; add bodies, cameras, sensors before compiling |
+| `build_model(spawn_props=False, hand="wuji")` | compiled `MjModel` |
+| `build_scene(spawn_props=False, hand="wuji")` | `(model, data)` at the home pose, ready to step |
 | `set_initial_pose(model, data)` | resets arms and hands to home and props to rest (call `mj_forward` after) |
 
 ### Helpers and constants
 
-- `set_hand(model, data, side, curl)`: set all 20 joints of one hand to `curl`
-  radians. `hand_actuators(side)` lists those actuator names in order.
+- `set_hand(model, data, side, closure)`: command one hand from open
+  (`HAND_OPEN` = 0) to a fist (`HAND_CLOSED` = 1); works for either hand.
+  `hand_pose(model, side, closure)` returns the targets without writing them.
+- `hand_actuators(model, side)`: that hand's actuator names in order.
+  `hand_type(model)`: `"wuji"` or `"sharpa"`.
+- `HANDS`, `DEFAULT_HAND`.
 - `LEFT_HOME_POSE`, `RIGHT_HOME_POSE`: home joint angles, in `ARM_JOINTS` order.
 - `block_height(model, data)`, `pick_success(model, data)`, `has_props(model)`.
 - Geometry: `BOARD_TOP`, `HALF_LEN`, `Y0`, `Y1`, `BLOCK_INIT_POS`, `BOX_INIT_POS`.
@@ -176,9 +205,9 @@ rgb = renderer.render()                       # (480, 640, 3) uint8
 ### Names worth knowing
 
 - Joints: `{left,right}_{shoulder_pan,shoulder_lift,elbow,wrist_1,wrist_2,wrist_3}_joint`,
-  `{left,right}_hand_finger{1..5}_joint{1..4}`; with props also the free joints
+  hand joints named like their actuators; with props also the free joints
   `block_joint` and `cardboard_box_joint` (qpos `[x, y, z, qw, qx, qy, qz]`).
-- Bodies: `{side}_flange_adapter`, `{side}_hand_palm_link`, `block`, `cardboard_box`.
+- Bodies: `{side}_flange_adapter`, the palm (see Hands), `block`, `cardboard_box`.
 - Sites: `{side}_attachment_site` (UR tool flange), `{side}_ft_site`.
 - Sensors: `{side}_ft_force`, `{side}_ft_torque`. These read the wrench between
   the hand and wrist_3 in the flange frame, like a UR wrist F/T sensor. They are
@@ -207,3 +236,6 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
 - `urgantry_sim/wuji_hand/`: MJCF and meshes from
   [wuji-technology/wuji-hand-description](https://github.com/wuji-technology/wuji-hand-description)
   (MIT, see its `LICENSE`).
+- `urgantry_sim/sharpa_wave/`: Sharpa Wave MJCF and meshes from
+  [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/sharpa_wave)
+  (Apache-2.0, see its `LICENSE`).

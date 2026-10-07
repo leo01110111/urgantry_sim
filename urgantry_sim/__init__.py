@@ -12,6 +12,7 @@ so any Gymnasium-based RL/eval code can do:
 
     env = gym.make("SimGantryUR7e-v0")                     # bare scene
     pick = gym.make("SimGantryUR7e-v0", spawn_props=True)  # with cube + tray
+    sharpa = gym.make("SimGantryUR7e-v0", hand="sharpa")   # Sharpa Wave hands
 
 See env.py:SimGantryUR7eEnv for the observation/action spec and task.
 """

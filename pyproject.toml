@@ -21,4 +21,4 @@ build-backend = "setuptools.build_meta"
 include = ["urgantry_sim*"]
 
 [tool.setuptools.package-data]
-urgantry_sim = ["**/*.xml", "**/*.stl", "**/*.STL", "**/*.obj", "**/*.png", "**/LICENSE"]
+urgantry_sim = ["**/*.xml", "**/*.stl", "**/*.STL", "**/*.obj", "**/*.png", "**/LICENSE", "**/*.md"]

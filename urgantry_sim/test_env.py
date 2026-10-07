@@ -5,17 +5,20 @@ steps, renders, and that the viewer/reset/reward plumbing works end to end.
     uv run python test_env.py                 # 3 episodes, live window
     uv run python test_env.py --episodes 1 --max-steps 200
     uv run python test_env.py --no-view       # headless (CI / no display)
+    uv run python test_env.py --hand sharpa
 """
 
 from __future__ import annotations
 
 import argparse
 
+from build_urgantry import DEFAULT_HAND, HANDS
 from env import SimGantryUR7eEnv
 
 
-def run(episodes: int, max_steps: int, view: bool, seed: int) -> None:
+def run(episodes: int, max_steps: int, view: bool, seed: int, hand: str) -> None:
     env = SimGantryUR7eEnv(
+        hand=hand,
         normalized_actions=True,   # Box(-1,1) so action_space.sample() is sane
         max_episode_steps=max_steps,
         show_viewer=view,
@@ -49,6 +52,7 @@ def main():
     p.add_argument("--episodes", type=int, default=3)
     p.add_argument("--max-steps", type=int, default=200)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--hand", choices=HANDS, default=DEFAULT_HAND)
     p.add_argument("--no-view", dest="view", action="store_false",
                    help="run headless (no on-screen viewer)")
     p.set_defaults(view=True)

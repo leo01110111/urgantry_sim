@@ -33,6 +33,7 @@ Quick checks:
 ```bash
 cd urgantry_sim
 uv run python build_urgantry.py               # interactive viewer, no stepping logic
+uv run python build_urgantry.py --export scene.xml   # write the scene as one MJCF
 uv run python test_env.py --no-view           # random actions through the gym env
 uv run python test_viz.py                     # viewer + top1 camera window
 ```
@@ -213,6 +214,37 @@ rgb = renderer.render()                       # (480, 640, 3) uint8
   the hand and wrist_3 in the flange frame, like a UR wrist F/T sensor. They are
   nonzero at rest (tool weight), so tare against a no-contact reading.
   Access with `data.sensor("right_ft_force").data`.
+
+### Exporting one MJCF file
+
+The scene is assembled in Python (the arm and hand MJCFs are attached with the
+`mjSpec` API), so there is no checked-in scene XML. To get one:
+
+```bash
+uv run python urgantry_sim/build_urgantry.py --hand sharpa --props --export scene.xml
+```
+
+```python
+from urgantry_sim.build_urgantry import export_mjcf
+export_mjcf("scene.xml", spawn_props=True, hand="sharpa")
+```
+
+```python
+model = mujoco.MjModel.from_xml_path("scene.xml")
+data = mujoco.MjData(model)
+mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)  # = set_initial_pose
+```
+
+- Mesh paths are written relative to the exported file, so it loads from any
+  working directory but must stay where it was written (or be re-exported).
+- Use keyframe `home`. `left_home` / `right_home` are leftovers from the UR
+  menagerie model and only pose one arm.
+- Checked against the Python-built model for all four hand/props combinations:
+  identical sizes, names, solver options and parameters (largest difference
+  1.6e-9, a rounded inertia on the fixed UR base). Sharpa trajectories match to
+  1e-10 over 2 s of random commands. Wuji matches until a ~5e-8 solver-level
+  difference appears and is amplified by its contacts (the same model perturbed
+  by 1e-9 diverges similarly), reaching 1e-3 rad after 2 s.
 
 ### Viewer
 

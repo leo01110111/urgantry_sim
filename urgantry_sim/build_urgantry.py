@@ -27,8 +27,12 @@ Coordinate frame: origin on the floor at the center of the exposed tabletop.
 
 Run directly to open the interactive viewer:
   uv run python build_urgantry.py [--hand wuji|sharpa] [--props]
+Export the assembled scene as one MJCF file:
+  uv run python build_urgantry.py --hand sharpa --props --export scene.xml
 """
 
+import os
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -204,6 +208,22 @@ def _lookat_quat(cam_pos, target):
     return quat
 
 
+def _load_part(path: str) -> mujoco.MjSpec:
+    """Load a component MJCF with its mesh/texture paths made absolute, so they
+    survive being attached into the scene and exported as one file (the
+    component's own meshdir/texturedir does not carry over)."""
+    spec = mujoco.MjSpec.from_file(path)
+    base = Path(path).resolve().parent
+    for assets, subdir in ((spec.meshes, spec.compiler.meshdir),
+                           (spec.textures, spec.compiler.texturedir)):
+        for asset in assets:
+            if asset.file:
+                asset.file = str(base / subdir / asset.file)
+    spec.compiler.meshdir = ""
+    spec.compiler.texturedir = ""
+    return spec
+
+
 def _strip_side_prefix(spec: mujoco.MjSpec, side: str) -> None:
     """Drop the Sharpa MJCF's own 'left_'/'right_' name prefix (and the
     references to those names), so the attach prefixes give
@@ -226,7 +246,7 @@ def _arm_with_hand(side: str, hand: str) -> mujoco.MjSpec:
     The hand's position actuators and its contact exclusions come along with the
     attach, prefixed 'hand_' (final actuator names e.g. 'left_hand_finger1_joint1'
     for Wuji, 'left_hand_index_MCP_FE' for Sharpa)."""
-    arm = mujoco.MjSpec.from_file(UR7E_PATH)
+    arm = _load_part(UR7E_PATH)
     flange = arm.site("attachment_site")
     adapter = arm.body("wrist_3_link").add_body(name="flange_adapter",
                                                 pos=flange.pos, quat=flange.quat)
@@ -234,7 +254,7 @@ def _arm_with_hand(side: str, hand: str) -> mujoco.MjSpec:
                      size=[ADAPTER_R, ADAPTER_T / 2, 0],
                      pos=[0, 0, FLANGE_FACE_Z + ADAPTER_T / 2],
                      mass=ADAPTER_MASS, rgba=ADAPTER_RGBA)
-    hand_spec = mujoco.MjSpec.from_file(HAND_PATHS[hand][side])
+    hand_spec = _load_part(HAND_PATHS[hand][side])
     if hand == "sharpa":
         _strip_side_prefix(hand_spec, side)
     palm = hand_spec.body(HAND_PALM[hand])
@@ -546,11 +566,53 @@ def build_scene(spawn_props: bool = False,
     return model, data
 
 
+def export_mjcf(path: str, spawn_props: bool = False, hand: str = DEFAULT_HAND) -> str:
+    """Write the assembled scene as one standalone MJCF at `path` and return it.
+    Asset paths are written relative to the file's directory, so keep it next to
+    this package (or re-export after moving it). The home pose is stored as
+    keyframe 'home' (qpos + ctrl): mj_resetDataKeyframe(model, data,
+    model.key("home").id) reproduces set_initial_pose."""
+    out_dir = Path(path).resolve().parent
+    spec = build_spec(spawn_props, hand)
+    spec.modelname = f"urgantry_{hand}"
+    model = spec.compile()
+    data = mujoco.MjData(model)
+    set_initial_pose(model, data)
+    spec.add_key(name="home", qpos=data.qpos.tolist(), ctrl=data.ctrl.tolist())
+    # to_xml() recompiles, so paths stay absolute until the text is written.
+    root = ET.fromstring(spec.to_xml())
+    parent = {child: el for el in root.iter() for child in el}
+    for el in root.iter():
+        # to_xml rounds quats to ~6 digits; the 45 deg mount tilt is sensitive to
+        # that, so rewrite body quats at full precision where the XML parent is
+        # the compiled parent (not a <frame>).
+        if (el.tag == "body" and el.get("quat") and el.get("name")
+                and parent[el].tag in ("body", "worldbody")):
+            q = model.body(el.get("name")).quat
+            el.set("quat", " ".join(f"{a:.17g}" for a in q))
+        file = el.get("file")
+        if file and os.path.isabs(file):
+            el.set("file", os.path.relpath(file, out_dir))
+        # to_xml drops axis="0 0 1" as a default, but in the merged file the hand
+        # joints then inherit the UR arm's default axis (0 1 0); write every axis.
+        if el.tag == "joint" and el.get("name"):
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, el.get("name"))
+            if jid >= 0 and model.jnt_type[jid] in (int(mujoco.mjtJoint.mjJNT_HINGE),
+                                                    int(mujoco.mjtJoint.mjJNT_SLIDE)):
+                el.set("axis", " ".join(f"{a:.12g}" for a in model.jnt_axis[jid]))
+    ET.indent(root)
+    xml = ET.tostring(root, encoding="unicode")
+    Path(path).write_text(xml)
+    return xml
+
+
 def parse_scene_args(argv=None):
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--hand", choices=HANDS, default=DEFAULT_HAND)
     p.add_argument("--props", action="store_true", help="spawn the block and tray")
+    p.add_argument("--export", metavar="PATH",
+                   help="write the scene as one MJCF file to PATH and exit")
     return p.parse_args(argv)
 
 
@@ -559,6 +621,10 @@ def main() -> None:
     import mujoco.viewer
 
     args = parse_scene_args()
+    if args.export:
+        export_mjcf(args.export, spawn_props=args.props, hand=args.hand)
+        print(f"wrote {args.export}")
+        return
     model, data = build_scene(spawn_props=args.props, hand=args.hand)
 
     with mujoco.viewer.launch_passive(model, data) as viewer:

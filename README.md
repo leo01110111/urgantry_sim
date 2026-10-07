@@ -8,6 +8,8 @@ two ways:
 1. **As a Gymnasium env** (`SimGantryUR7e-v0`) to run or evaluate a policy.
 2. **As a raw MuJoCo model** (`build_urgantry.build_scene`) for scripting, IK,
    data generation, or anything that needs direct `MjModel` / `MjData` access.
+3. **As plain MJCF files** (`scene_wuji.xml`, `scene_sharpa.xml` in the repo
+   root) for tools that only take an XML file, with no Python package needed.
 
 The arm MJCF lives at `universal_robots_ur5e/ur5e.xml` for historical reasons;
 the robot is a UR7e.
@@ -217,11 +219,8 @@ rgb = renderer.render()                       # (480, 640, 3) uint8
 
 ### Exporting one MJCF file
 
-The scene is assembled in Python (the arm and hand MJCFs are attached with the
-`mjSpec` API). Pre-exported copies of the default (bare, no props) scene live at
-the repo root: `scene_wuji.xml` and `scene_sharpa.xml`
-(`python -m mujoco.viewer --mjcf=scene_sharpa.xml`). They are snapshots: re-export
-after changing `build_urgantry.py`. To export another variant:
+`export_mjcf` writes any hand/props variant as a single MJCF file (see use case
+3 for what the file contains and how to load it):
 
 ```bash
 uv run python urgantry_sim/build_urgantry.py --hand sharpa --props --export scene.xml
@@ -232,22 +231,8 @@ from urgantry_sim.build_urgantry import export_mjcf
 export_mjcf("scene.xml", spawn_props=True, hand="sharpa")
 ```
 
-```python
-model = mujoco.MjModel.from_xml_path("scene.xml")
-data = mujoco.MjData(model)
-mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)  # = set_initial_pose
-```
-
-- Mesh paths are written relative to the exported file, so it loads from any
-  working directory but must stay where it was written (or be re-exported).
-- Use keyframe `home`. `left_home` / `right_home` are leftovers from the UR
-  menagerie model and only pose one arm.
-- Checked against the Python-built model for all four hand/props combinations:
-  identical sizes, names, solver options and parameters (largest difference
-  1.6e-9, a rounded inertia on the fixed UR base). Sharpa trajectories match to
-  1e-10 over 2 s of random commands. Wuji matches until a ~5e-8 solver-level
-  difference appears and is amplified by its contacts (the same model perturbed
-  by 1e-9 diverges similarly), reaching 1e-3 rad after 2 s.
+Mesh paths are written relative to the exported file, so it loads from any
+working directory but must stay where it was written (or be re-exported).
 
 ### Viewer
 
@@ -261,6 +246,75 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
         mujoco.mj_step(model, data)
         viewer.sync()
 ```
+
+---
+
+## Use case 3: the MJCF scene files
+
+The scene is assembled in Python (the arm and hand MJCFs are attached with the
+`mjSpec` API), so these files are generated, not hand-written. They hold the
+complete scene in one XML each and load with plain `mujoco`, with no need to
+install or import `urgantry_sim`.
+
+| file | hands | actuators | props |
+|---|---|---|---|
+| `scene_wuji.xml` | Wuji | 52 | none (bare scene) |
+| `scene_sharpa.xml` | Sharpa Wave | 56 | none (bare scene) |
+
+View one:
+
+```bash
+python -m mujoco.viewer --mjcf=scene_sharpa.xml
+```
+
+Load and start from the home pose:
+
+```python
+import mujoco
+
+model = mujoco.MjModel.from_xml_path("scene_sharpa.xml")
+data = mujoco.MjData(model)
+mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+```
+
+What is in them:
+
+- Everything in the Scene section above: room, table, gantry, both arms with the
+  flange adapter and hands, the `top1` camera, the wrist F/T sensors. Names and
+  actuator order are the same as in the Python-built model.
+- Keyframe `home`: the same qpos and ctrl that `set_initial_pose` sets (arms at
+  home, hands open). Reset to it before stepping, otherwise every joint starts at
+  zero. Ignore `left_home` / `right_home`: they come from the UR menagerie model
+  and only pose one arm.
+- Mesh and texture paths are relative to the repo root (`urgantry_sim/...`), so
+  the files must stay in the repo root next to the `urgantry_sim/` folder.
+
+What is not in them:
+
+- The task logic. Reward, success and episode handling live in the Gymnasium
+  env, not in the XML.
+- The block and tray. Export a props variant with
+  `--props` (see "Exporting one MJCF file") if you need them.
+
+They are snapshots. After changing `build_urgantry.py`, regenerate them from the
+repo root:
+
+```bash
+uv run python urgantry_sim/build_urgantry.py --hand wuji --export scene_wuji.xml
+uv run python urgantry_sim/build_urgantry.py --hand sharpa --export scene_sharpa.xml
+```
+
+How closely they match the Python-built model (checked for both hands, with and
+without props): identical sizes, names, solver options and parameters. The
+largest difference is 1.6e-9, a rounded inertia on the fixed UR base. Sharpa
+trajectories match to 1e-10 over 2 s of random commands. Wuji matches until a
+~5e-8 solver-level difference appears and its finger contacts amplify it (the
+same model perturbed by 1e-9 diverges similarly), reaching 1e-3 rad after 2 s.
+
+The export writes two things explicitly that MuJoCo's `MjSpec.to_xml()` gets
+wrong for this scene: every joint axis (otherwise `axis="0 0 1"` is dropped as a
+default and the Wuji finger joints inherit the UR arm's `0 1 0`), and body
+quaternions at full precision (otherwise rounded to ~6 digits).
 
 ---
 
